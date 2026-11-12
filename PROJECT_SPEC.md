@@ -73,6 +73,11 @@ State machine:
 `pending -> failed`, `scanning -> failed`. The `indexed` and `failed` states are
 terminal.
 
+While `scanning`, the inspection publishes durable progress from frames that
+have actually been decoded and fingerprinted. Provisional cut and scene data
+must never appear on the record before the terminal `indexed` commit, so a
+mid-flight read shows partial frame counts without claiming final scenes.
+
 ### Contact sheet
 
 A contact sheet belongs to one indexed inspection. It contains a bounded grid
@@ -92,6 +97,34 @@ State machine:
 
 `planned -> failed`, `compositing -> failed`. The `ready` and `failed` states
 are terminal.
+
+While `compositing`, the sheet publishes durable progress from tiles whose
+source frames have actually been decoded. Decoded tiles must not be reported
+as a delivered image: the tile map, digest, and artifact stay unavailable until
+the full PPM is composed, verified, and committed to `ready`.
+
+### Durable job progress
+
+In-flight inspections and contact sheets each own a compact progress sidecar
+stored beside their record. The sidecar holds only a unit kind, completed and
+total unit counts, a stage, a state, a monotonic revision, and a timestamp.
+
+Invariants:
+
+- Progress counts only fully completed media units (a fingerprinted sampled
+  frame or a decoded tile), never tentative analysis or partial artifact bytes.
+- The main record is not rewritten per frame; the accumulating scene,
+  fingerprint, and PPM results are committed once at the terminal transition.
+- Sidecar writes are atomic temp-file publications guarded by the per-key
+  thread and file lock, with a revision that may only advance and counters that
+  may never regress, so concurrent requests and other processes read coherent
+  progress corresponding to work already performed.
+- Sidecar rewrites are batched per `progress_flush_stride` units rather than
+  once per frame, bounding write amplification to O(units / stride).
+- A failed job retains the counters for the work it finished and its stable
+  error code; a successful terminal record keeps its existing meaning and adds
+  a complete progress view. The record state is authoritative whenever a
+  sidecar lags behind it.
 
 ## Modules
 
@@ -173,9 +206,9 @@ removed and no artifact URL becomes available.
 - `PUT /v1/clips/{clip_id}`
 - `GET /v1/clips/{clip_id}`
 - `POST /v1/clips/{clip_id}/inspections`
-- `GET /v1/inspections/{inspection_id}`
+- `GET /v1/inspections/{inspection_id}` (includes a nested `progress` block)
 - `POST /v1/inspections/{inspection_id}/contact-sheets`
-- `GET /v1/contact-sheets/{sheet_id}`
+- `GET /v1/contact-sheets/{sheet_id}` (includes a nested `progress` block)
 - `GET /v1/contact-sheets/{sheet_id}/artifact`
 
 Errors are JSON objects with `error.code`, `error.message`, and an optional
@@ -190,6 +223,14 @@ start the real HTTP application on a loopback port, create media through the
 production AVI writer, and exercise success plus a representative failure.
 They also verify persisted state and output digests. The build command only
 compiles the Python source and does not require network access.
+
+The `check_job_progress.py` smoke path holds media workers mid-flight through
+a progress listener seam and verifies that the existing query endpoints report
+trustworthy partial progress, that tentative scenes and partial contact-sheet
+outputs are never exposed as final, that failures keep their completed-work
+counters, that parallel jobs remain namespaced, and that an independent
+process (`tools/_cross_process_reader.py`, run with `python -I`) can read the
+same durable sidecar.
 
 Automated tests are deferred to the later task boundary. This baseline keeps
 the smoke paths deterministic and local so future tests can replace or extend

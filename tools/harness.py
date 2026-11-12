@@ -11,6 +11,7 @@ from frame_proxy.app import build_router
 from frame_proxy.config import Settings
 from frame_proxy.http.server import FrameProxyServer, build_server
 from frame_proxy.media.avi_writer import build_sample_avi
+from frame_proxy.service.progress_tracker import ProgressEvent, ProgressListener
 
 
 class HttpResult:
@@ -29,17 +30,123 @@ class HttpResult:
         return value
 
 
+class GateListener:
+    """Durable-flush listener that blocks the worker until a test releases it.
+
+    Callbacks run on the media worker thread after a progress sidecar has been
+    atomically committed, so a GET issued while the gate is closed always
+    observes progress corresponding to work already finished.
+
+    The first ``pass_through`` callbacks return immediately so the worker can
+    reach an interesting mid-flight point; the gate then holds the worker
+    until :meth:`open` (or until ``open_after`` events have arrived).
+    """
+
+    def __init__(
+        self,
+        *,
+        open_after: int | None = None,
+        pass_through: int = 1,
+        open_when=None,
+    ) -> None:
+        self._open_after = open_after
+        self._pass_through = pass_through
+        self._open_when = open_when
+        self._events: list[ProgressEvent] = []
+        # Separate conditions: readers wait on _events_condition for new
+        # events, the worker waits on _gate_condition to be released.
+        self._events_condition = threading.Condition()
+        self._gate_condition = threading.Condition()
+        self._closed = False
+
+    def on_progress(self, event: ProgressEvent) -> None:
+        with self._events_condition:
+            self._events.append(event)
+            count = len(self._events)
+            self._events_condition.notify_all()
+        if self._open_when is not None and self._open_when(list(self._events)):
+            with self._gate_condition:
+                self._closed = False
+                self._gate_condition.notify_all()
+            return
+        if self._open_after is not None and count >= self._open_after:
+            with self._gate_condition:
+                self._closed = False
+                self._gate_condition.notify_all()
+            return
+        if count <= self._pass_through:
+            return
+        with self._gate_condition:
+            self._closed = True
+            while self._closed:
+                self._gate_condition.wait(timeout=10.0)
+
+    def open(self) -> None:
+        with self._gate_condition:
+            self._closed = False
+            self._gate_condition.notify_all()
+
+    @property
+    def events(self) -> list[ProgressEvent]:
+        with self._events_condition:
+            return list(self._events)
+
+    def last_event(self) -> ProgressEvent:
+        with self._events_condition:
+            if not self._events:
+                raise RuntimeError("gate listener has not observed any progress")
+            return self._events[-1]
+
+    def wait_for_event(self, count: int) -> list[ProgressEvent]:
+        with self._events_condition:
+            while len(self._events) < count:
+                if not self._events_condition.wait(timeout=10.0):
+                    raise RuntimeError("timed out waiting for progress event")
+            return list(self._events)
+
+
+class FailingListener:
+    """Raises after the Nth durable flush to exercise the failure path."""
+
+    def __init__(self, *, fail_after: int) -> None:
+        self._fail_after = fail_after
+        self._seen = 0
+
+    def on_progress(self, event: ProgressEvent) -> None:
+        self._seen += 1
+        if self._seen >= self._fail_after:
+            raise RuntimeError("injected media work failure")
+
+
 class RunningService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        inspection_listener: ProgressListener | None = None,
+        contact_sheet_listener: ProgressListener | None = None,
+        progress_flush_stride: int = 1,
+    ) -> None:
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._server: FrameProxyServer | None = None
         self._thread: threading.Thread | None = None
         self._port = 0
+        self._inspection_listener = inspection_listener
+        self._contact_sheet_listener = contact_sheet_listener
+        self._progress_flush_stride = progress_flush_stride
+        self.data_dir: Path | None = None
 
     def __enter__(self) -> "RunningService":
         self._temporary = tempfile.TemporaryDirectory(prefix="frame-proxy-check-")
-        settings = Settings(data_root=Path(self._temporary.name))
-        router = build_router(settings)
+        self.data_dir = Path(self._temporary.name)
+        settings = Settings(
+            data_root=self.data_dir,
+            progress_flush_stride=self._progress_flush_stride,
+        )
+        router = build_router(
+            settings,
+            inspection_listener=self._inspection_listener,
+            contact_sheet_listener=self._contact_sheet_listener,
+        )
         self._server = build_server(
             "127.0.0.1",
             0,
@@ -68,6 +175,7 @@ class RunningService:
             self._thread.join(timeout=2.0)
         if self._temporary is not None:
             self._temporary.cleanup()
+        self.data_dir = None
 
     def request(
         self,
@@ -144,4 +252,3 @@ def require(condition: bool, message: str) -> None:
 
 def success(label: str, details: dict[str, Any]) -> None:
     print(f"PASS {label}: {json.dumps(details, sort_keys=True)}")
-

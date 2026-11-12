@@ -79,13 +79,21 @@ class RequestRouter:
             if len(parts) == 4 and parts[3] == "inspections" and method == "POST":
                 request = validate_inspection_request(self._decode_json(body))
                 record = self._inspections.create(clip_id, request)
-                return ResponseData.json(201, {"inspection": record.as_dict()})
+                body_value = {"inspection": record.as_dict()}
+                body_value["inspection"]["progress"] = (
+                    self._inspections.get_progress_view(record.inspection_id)
+                )
+                return ResponseData.json(201, body_value)
 
         if parts[1] == "inspections" and len(parts) >= 3:
             inspection_id = parts[2]
             if len(parts) == 3 and method == "GET":
                 record = self._inspections.get(inspection_id)
-                return ResponseData.json(200, {"inspection": record.as_dict()})
+                body_value = {"inspection": record.as_dict()}
+                body_value["inspection"]["progress"] = (
+                    self._inspections.get_progress_view(inspection_id)
+                )
+                return ResponseData.json(200, body_value)
             if (
                 len(parts) == 4
                 and parts[3] == "contact-sheets"
@@ -93,13 +101,21 @@ class RequestRouter:
             ):
                 request = validate_contact_sheet_request(self._decode_json(body))
                 record = self._contact_sheets.create(inspection_id, request)
-                return ResponseData.json(201, {"contact_sheet": record.as_dict()})
+                body_value = {"contact_sheet": record.as_dict()}
+                body_value["contact_sheet"]["progress"] = (
+                    self._contact_sheets.get_progress_view(record.sheet_id)
+                )
+                return ResponseData.json(201, body_value)
 
         if parts[1] == "contact-sheets" and len(parts) >= 3:
             sheet_id = parts[2]
             if len(parts) == 3 and method == "GET":
                 record = self._contact_sheets.get(sheet_id)
-                return ResponseData.json(200, {"contact_sheet": record.as_dict()})
+                body_value = {"contact_sheet": record.as_dict()}
+                body_value["contact_sheet"]["progress"] = (
+                    self._contact_sheets.get_progress_view(sheet_id)
+                )
+                return ResponseData.json(200, body_value)
             if len(parts) == 4 and parts[3] == "artifact" and method == "GET":
                 payload = self._contact_sheets.get_artifact(sheet_id)
                 return ResponseData.binary(

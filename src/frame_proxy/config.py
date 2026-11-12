@@ -17,6 +17,7 @@ class Settings:
     max_sheet_pixels: int = 250_000
     max_sheet_scenes: int = 36
     request_timeout_seconds: float = 30.0
+    progress_flush_stride: int = 25
 
     @classmethod
     def from_env(cls) -> "Settings":

@@ -36,11 +36,17 @@ class DataPaths:
     def inspection_record(self, inspection_id: str) -> Path:
         return self.inspections / f"{inspection_id}.json"
 
+    def inspection_progress(self, inspection_id: str) -> Path:
+        return self.inspections / f"{inspection_id}.progress.json"
+
     def contact_sheet_dir(self, sheet_id: str) -> Path:
         return self.contact_sheets / sheet_id
 
     def contact_sheet_record(self, sheet_id: str) -> Path:
         return self.contact_sheet_dir(sheet_id) / "record.json"
+
+    def contact_sheet_progress(self, sheet_id: str) -> Path:
+        return self.contact_sheet_dir(sheet_id) / "progress.json"
 
     def contact_sheet_artifact(self, sheet_id: str, name: str) -> Path:
         return self.contact_sheet_dir(sheet_id) / name

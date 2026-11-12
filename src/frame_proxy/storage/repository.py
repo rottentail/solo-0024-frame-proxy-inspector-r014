@@ -14,6 +14,13 @@ from frame_proxy.domain.models import (
     ContactSheetRecord,
     InspectionRecord,
 )
+from frame_proxy.domain.progress import (
+    CONTACT_SHEET_KIND,
+    INSPECTION_KIND,
+    JobProgress,
+    is_valid_stage,
+    state_rank,
+)
 from frame_proxy.storage.atomic import atomic_write_bytes, atomic_write_json
 from frame_proxy.storage.lock import FileKeyLock
 from frame_proxy.storage.paths import DataPaths
@@ -121,6 +128,32 @@ class FileRepository:
                 details={"inspection_id": inspection_id},
             )
 
+    def create_inspection_progress(self, progress: JobProgress) -> None:
+        self._create_progress(
+            progress,
+            self.paths.inspection_progress(progress.job_id),
+            self.paths.lock_path("inspection", progress.job_id),
+            INSPECTION_KIND,
+        )
+
+    def get_inspection_progress(
+        self,
+        inspection_id: str,
+    ) -> JobProgress | None:
+        return self._read_progress(
+            self.paths.inspection_progress(inspection_id),
+            INSPECTION_KIND,
+            inspection_id,
+        )
+
+    def save_inspection_progress(self, progress: JobProgress) -> None:
+        self._save_progress(
+            progress,
+            self.paths.inspection_progress(progress.job_id),
+            self.paths.lock_path("inspection", progress.job_id),
+            INSPECTION_KIND,
+        )
+
     def create_contact_sheet(self, record: ContactSheetRecord) -> None:
         path = self.paths.contact_sheet_record(record.sheet_id)
         directory = self.paths.contact_sheet_dir(record.sheet_id)
@@ -206,4 +239,119 @@ class FileRepository:
                 "contact sheet artifact was not found",
                 details={"sheet_id": sheet_id},
             )
+
+    def create_contact_sheet_progress(self, progress: JobProgress) -> None:
+        self._create_progress(
+            progress,
+            self.paths.contact_sheet_progress(progress.job_id),
+            self.paths.lock_path("contact-sheet", progress.job_id),
+            CONTACT_SHEET_KIND,
+        )
+
+    def get_contact_sheet_progress(
+        self,
+        sheet_id: str,
+    ) -> JobProgress | None:
+        return self._read_progress(
+            self.paths.contact_sheet_progress(sheet_id),
+            CONTACT_SHEET_KIND,
+            sheet_id,
+        )
+
+    def save_contact_sheet_progress(self, progress: JobProgress) -> None:
+        self._save_progress(
+            progress,
+            self.paths.contact_sheet_progress(progress.job_id),
+            self.paths.lock_path("contact-sheet", progress.job_id),
+            CONTACT_SHEET_KIND,
+        )
+
+    def _create_progress(
+        self,
+        progress: JobProgress,
+        path: "Path",
+        lock_path: "Path",
+        expected_kind: str,
+    ) -> None:
+        self._validate_progress(progress, expected_kind)
+        with FileKeyLock(lock_path):
+            if path.exists():
+                raise ConflictError(
+                    "progress record already exists",
+                    details={"job_id": progress.job_id},
+                )
+            atomic_write_json(path, progress.as_dict())
+
+    def _save_progress(
+        self,
+        progress: JobProgress,
+        path: "Path",
+        lock_path: "Path",
+        expected_kind: str,
+    ) -> None:
+        self._validate_progress(progress, expected_kind)
+        with FileKeyLock(lock_path):
+            if not path.exists():
+                raise NotFoundError(
+                    ErrorCode.STORAGE,
+                    "progress record was not found",
+                    details={"job_id": progress.job_id},
+                )
+            current = JobProgress.from_dict(self._read_json(path))
+            if progress.revision <= current.revision:
+                raise ConflictError(
+                    "progress revision must advance monotonically",
+                    details={
+                        "job_id": progress.job_id,
+                        "current_revision": current.revision,
+                        "attempted_revision": progress.revision,
+                    },
+                )
+            if state_rank(progress.state) < state_rank(current.state):
+                raise ConflictError(
+                    "progress state cannot move backwards",
+                    details={
+                        "job_id": progress.job_id,
+                        "current_state": current.state,
+                        "attempted_state": progress.state,
+                    },
+                )
+            if progress.completed_units < current.completed_units:
+                raise ConflictError(
+                    "completed work cannot be removed from progress",
+                    details={"job_id": progress.job_id},
+                )
+            atomic_write_json(path, progress.as_dict())
+
+    def _read_progress(
+        self,
+        path: "Path",
+        expected_kind: str,
+        job_id: str,
+    ) -> JobProgress | None:
+        try:
+            data = self._read_json(path)
+        except FileNotFoundError:
+            return None
+        progress = JobProgress.from_dict(data)
+        if progress.job_kind != expected_kind or progress.job_id != job_id:
+            raise RuntimeError(
+                f"progress sidecar at {path} does not identify {expected_kind}/{job_id}"
+            )
+        return progress
+
+    @staticmethod
+    def _validate_progress(progress: JobProgress, expected_kind: str) -> None:
+        if progress.job_kind != expected_kind:
+            raise RuntimeError(
+                f"progress kind {progress.job_kind!r} does not match {expected_kind!r}"
+            )
+        if not is_valid_stage(progress.job_kind, progress.stage):
+            raise RuntimeError(
+                f"unknown progress stage {progress.stage!r} for {expected_kind}"
+            )
+        if progress.completed_units < 0 or progress.total_units < 0:
+            raise RuntimeError("progress unit counts must not be negative")
+        if progress.completed_units > progress.total_units and progress.total_units:
+            raise RuntimeError("progress completed count exceeds its total")
 

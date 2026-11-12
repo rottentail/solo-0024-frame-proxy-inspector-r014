@@ -19,6 +19,10 @@
     {
       "workflow_id": "create-contact-sheet",
       "command": "PYTHONPATH=src:. python3 tools/check_contact_sheet.py"
+    },
+    {
+      "workflow_id": "durable-job-progress",
+      "command": "PYTHONPATH=src:. python3 tools/check_job_progress.py"
     }
   ]
 }
